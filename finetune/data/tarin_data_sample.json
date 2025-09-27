@@ -1,9 +1,0 @@
-{
-  "iMiGUE_train_dep_2k": {
-    "root": "/scratch/project_2011211/yyy/CV2025/iMiGUE-process/iMiGUE-clips",
-    "annotation": "/scratch/project_2011211/yyy/InternVL/fintune/data/data_dep/iMiGUE_train_dep.jsonl",
-    "data_augment": false,
-    "repeat_time": 1,
-    "length": 2041
-  }
-}

@@ -217,4 +217,4 @@ exp_caption_json_path = args.expfile
 write_predictions_to_csv(input_path, 
                          output_path, 
                          exp_caption_json_path,
-                        './iMiGUE-clips/')
+                        './SayNext-PC2K-clips/')
