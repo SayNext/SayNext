@@ -1,6 +1,8 @@
 # Official PyTorch Implementation of SayNext-Chat.
 
-<img src="figs/main.png" alt="SayNext-Chat Framework" width="500"/>
+<p align="center">
+  <img src="figs/main.png" alt="SayNext-Chat Framework" width="600"/>
+</p>
 
 
 > [**SAYNEXT: A Benchmark and Cognitively Inspired Framework for Next-Utterance Prediction with Multimodal LLMs**]<br>
@@ -8,11 +10,12 @@
 
 ## 📰 News
 
-**[2025.9.20]** Welcome to **watch** our official [website](https://saynext.github.io/)!
+**[2025.9.20]** Welcome to **watch** our official [website](https://saynext.github.io/)! 
+
 **[2025.3.19]** Welcome to **watch** this repository for the latest updates.
 
 
-## :croissant: Data preparation
+## :croissant: Dataset
 The dataset is in our [Huggingface](https://huggingface.co/datasets/SayNext/SayNext-PC2K). 
 
 
