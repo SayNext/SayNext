@@ -2,11 +2,15 @@
  * Copyright (c) 2025.
  * All rights reserved.
  * Code for SayNext project
+ * Part from InterVL
 """
+
+
 import warnings
 from typing import Any, List, Optional, Tuple, Union
-import os
 
+import json
+import torch.nn.functional as F
 import torch.distributed as dist
 import torch.utils.checkpoint
 import transformers
@@ -25,10 +29,6 @@ from transformers.utils import ModelOutput, logging
 from .configuration_internvl_chat import InternVLChatConfig
 from .modeling_intern_vit import InternVisionModel
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
 logger = logging.get_logger(__name__)
 
 
@@ -39,277 +39,8 @@ def version_cmp(v1, v2, op='eq'):
     op_func = getattr(operator, op)
     return op_func(version.parse(v1), version.parse(v2))
 
-# def compute_vae_loss(recon_x, x, mu, logvar):
-#     """
-#     Compute VAE Loss: Reconstruction Loss + KL Divergence Loss.
-#     Args:
-#         recon_x: Reconstructed input.
-#         x: Original input.
-#         mu: Mean of the latent space.
-#         logvar: Log-variance of the latent space.
-#     Returns:
-#         Total VAE loss.
-#     """
-#     # Reconstruction loss (MSE)
-#     recon_loss = F.mse_loss(recon_x, x, reduction='mean')
-    
-#     # KL divergence loss
-#     kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / x.size(0)
-    
-#     return recon_loss + kl_loss
 
-def compute_vae_loss(recon_x, x, mu, logvar, beta=0.1):
-    """
-    Compute VAE Loss: Reconstruction Loss + KL Divergence Loss (with stabilization).
-    Args:
-        recon_x: Reconstructed input.
-        x: Original input.
-        mu: Mean of the latent space.
-        logvar: Log-variance of the latent space.
-        beta: Weight for KL divergence (default: 0.1).
-    Returns:
-        Stabilized total VAE loss.
-    """
-    # print(f"recon_x - min: {recon_x.min().item()}, max: {recon_x.max().item()}, contains NaN: {torch.isnan(recon_x).any().item()}")
-    # print(f"x - min: {x.min().item()}, max: {x.max().item()} {x.mean()} {x.std()}, contains NaN: {torch.isnan(x).any().item()}")
-    norm_x = (x - x.mean()) / (x.std() + 1e-6)
-    # print(f"norm_x - min: {norm_x.min().item()}, max: {norm_x.max().item()}, contains NaN: {torch.isnan(norm_x).any().item()}")
-
-    # Reconstruction loss (MSE)
-    recon_loss = F.mse_loss(norm_x, recon_x, reduction='mean')
-    # Clamp logvar to avoid extreme values
-    # logvar = torch.clamp(logvar, min=-10, max=10)
-
-    # KL divergence loss with beta scaling for stabilization
-    kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-    kl_loss /= x.size(0)  # Normalize by batch size
-    kl_loss /= mu.size(1) # NEW
-
-    # kl_loss = torch.mean(-0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=2)) # 和上面是等价的
-
-    # Combine reconstruction and KL divergence losses
-    vae_loss = recon_loss + beta * kl_loss
-    print(f"recon_loss: {recon_loss.item()}, kl_loss: {kl_loss.item()}, vae_loss:{vae_loss.item()}")
-    if torch.isnan(recon_loss).any() or torch.isnan(kl_loss).any():
-        print("Warning: NaN detected in VAE loss components!")
-    return vae_loss
-
-
-# class VAE(nn.Module):
-#     def __init__(self, latent_dim=64, hidden_channels=256):
-#         """
-#         输入: x.shape = [batch, 256, 4096]
-#         """
-#         super(VAE, self).__init__()
-        
-#         # Encoder 部分
-#         # 先将输入转置为 [batch, 4096, 256]，将 4096 作为 in_channels，
-#         # 用 1D 卷积在 token 维度（长度 256）上提取局部特征
-#         self.enc_conv1 = nn.Conv1d(in_channels=4096, out_channels=hidden_channels, kernel_size=3, stride=2, padding=1)
-#         self.enc_act1 = nn.LeakyReLU(0.2)
-#         self.enc_conv2 = nn.Conv1d(in_channels=hidden_channels, out_channels=hidden_channels, kernel_size=3, stride=2, padding=1)
-#         self.enc_act2 = nn.LeakyReLU(0.2)
-
-#         # 在第二个卷积层之后添加 BatchNorm1d 归一化层
-#         self.enc_norm = nn.BatchNorm1d(hidden_channels)
-
-#         # 经两层卷积后，token 维度从 256 依次缩小到 128 和 64
-#         # 将 [batch, hidden_channels, 64] 展平后得到特征维度 hidden_channels*64
-#         self.enc_fc = nn.Linear(hidden_channels * 64, latent_dim * 2)  # 输出 latent_dim*2 用于分别计算均值和 log方差
-        
-#         # Decoder 部分
-#         self.dec_fc = nn.Linear(latent_dim, hidden_channels * 64)
-#         # 重构后形状为 [batch, hidden_channels, 64]，然后经过反卷积逐步恢复 token 数量
-#         self.dec_deconv1 = nn.ConvTranspose1d(in_channels=hidden_channels, out_channels=hidden_channels, 
-#                                               kernel_size=3, stride=2, padding=1, output_padding=1)
-#         self.dec_act1 = nn.LeakyReLU(0.2)
-#         self.dec_deconv2 = nn.ConvTranspose1d(in_channels=hidden_channels, out_channels=4096, 
-#                                               kernel_size=3, stride=2, padding=1, output_padding=1)
-#         # 最后再转置回来，使输出形状为 [batch, 256, 4096]
-    
-#     def reparameterize(self, mu, logvar, deterministic=False):
-#         if deterministic:
-#             return mu
-#         std = torch.exp(0.5 * logvar)
-#         eps = torch.randn_like(std)
-#         return mu + eps * std
-    
-#     def encode(self, x):
-#         # x shape: [batch, 256, 4096]
-#         # 转置为 [batch, 4096, 256] 以适配 Conv1d
-#         x = x.transpose(1, 2)
-#         h = self.enc_act1(self.enc_conv1(x))   # shape: [batch, hidden_channels, 128]
-#         h = self.enc_act2(self.enc_conv2(h))     # shape: [batch, hidden_channels, 64]
-#         h = self.enc_norm(h)                     # 加入归一化层，稳定每个通道的分布
-#         # 展平特征
-#         h = h.view(h.size(0), -1)                # shape: [batch, hidden_channels * 64]
-#         h = self.enc_fc(h)                       # shape: [batch, latent_dim*2]
-#         mu, logvar = h.chunk(2, dim=1)           # 均值和 log方差各 shape: [batch, latent_dim]
-#         return mu, logvar
-    
-#     def decode(self, z):
-#         h = self.dec_fc(z)                       # shape: [batch, hidden_channels * 64]
-#         # 恢复到卷积特征图形状
-#         h = h.view(z.size(0), -1, 64)             # shape: [batch, hidden_channels, 64]
-#         h = self.dec_act1(self.dec_deconv1(h))     # shape: [batch, hidden_channels, 128]
-#         h = self.dec_deconv2(h)                    # shape: [batch, 4096, 256]
-#         # 转置回原始形状 [batch, 256, 4096]
-#         x_hat = h.transpose(1, 2)
-#         return x_hat
-    
-#     def forward(self, x, deterministic=False):
-#         mu, logvar = self.encode(x)
-#         z = self.reparameterize(mu, logvar, deterministic)
-#         x_hat = self.decode(z)
-#         return x_hat, mu, logvar
-
-class VAE(nn.Module):
-    def __init__(self, input_dim, hidden_dim, latent_dim, output_dim):
-        super(VAE, self).__init__()
-
-        self.FC_input = nn.Linear(input_dim, hidden_dim)
-        self.norm_input = nn.LayerNorm(hidden_dim, eps=1e-2)
-        self.FC_input2 = nn.Linear(hidden_dim, latent_dim)
-        self.norm_input2 = nn.LayerNorm(latent_dim, eps=1e-2)
-        self.FC_mean = nn.Linear(latent_dim, latent_dim)
-        self.FC_var = nn.Linear(latent_dim, latent_dim)
-
-        self.FC_hidden = nn.Linear(latent_dim, output_dim)
-        self.norm_hidden = nn.LayerNorm(output_dim)
-        # self.FC_hidden = nn.Linear(latent_dim, latent_dim)
-        # self.norm_hidden = nn.LayerNorm(latent_dim)
-        # self.FC_hidden2 = nn.Linear(latent_dim, output_dim)
-        # self.norm_hidden2 = nn.LayerNorm(output_dim)
-        self.FC_output = nn.Linear(output_dim, output_dim)
-
-        # 使用 nn.GELU 激活函数替代原来的 LeakyReLU
-        self.activation = nn.GELU()
-
-    def encoder(self, x):
-        # x: [batch, input_dim]
-        h = self.FC_input(x)                  # [16, 256, hidden_dim]，例如 [16, 256, 3584]
-        h = self.norm_input(h)                # [16, 256, hidden_dim]，例如 [16, 256, 3584]
-        h = self.activation(h)                # [16, 256, hidden_dim]，例如 [16, 256, 3584]
-        h = self.FC_input2(h)                 # [16, 256, latent_dim]，例如 [16, 256, 3072]
-        h = self.norm_input2(h)               # [16, 256, latent_dim]，例如 [16, 256, 3072]
-        h = self.activation(h)                # [16, 256, latent_dim]，例如 [16, 256, 3072]
-        mean = self.FC_mean(h)                # [16, 256, latent_dim]，例如 [16, 256, 3072]
-        log_var = self.FC_var(h)              # [16, 256, latent_dim]，例如 [16, 256, 3072]
-        return mean, log_var
-
-    def reparameterization(self, mean, log_var, deterministic=False):
-        if deterministic:
-            return mean  
-        else:
-            epsilon = torch.randn_like(log_var)   
-            z = mean + torch.exp(0.5 * log_var) * epsilon  
-            return z
-
-    def decoder(self, z, return_h=False):
-        # z: [batch, token_num, latent_dim]，例如 [16, 256, 3072]
-        h = self.FC_hidden(z)                 # [16, 256, output_dim]，例如 [16, 256, 3072]
-        h = self.norm_hidden(h)               # [16, 256, output_dim]，例如 [16, 256, 3072]
-        h = self.activation(h)                # [16, 256, output_dim]，例如 [16, 256, 3072]
-        # h = self.FC_hidden2(h)                # [16, 256, output_dim]，例如 [16, 256, 4096]
-        # h = self.norm_hidden2(h)              # [16, 256, output_dim]，例如 [16, 256, 4096]
-        # h = self.activation(h)                # [16, 256, output_dim]，例如 [16, 256, 4096]
-        x_hat = self.FC_output(h)             # [16, 256, output_dim]，例如 [16, 256, 4096]
-        return x_hat
-
-    def forward(self, x, deterministic=False, return_h=False):
-        mean, log_var = self.encoder(x)
-        z = self.reparameterization(mean, log_var, deterministic=deterministic)
-        x_hat = self.decoder(z)
-        return x_hat, mean, log_var, z
-
-        
-
-
-# class VAE(nn.Module):
-#     def __init__(self, input_dim=4096, latent_dim=64, hidden_dim=1024):
-#         """
-#         Variational Autoencoder (VAE) for encoding and reconstructing visual features.
-#         Args:
-#             input_dim (int): Dimensionality of the input features (e.g., 4096 from vit_embeds).
-#             latent_dim (int): Dimensionality of the latent space (default: 64).
-#             hidden_dim (int): Dimensionality of the hidden layers (default: 1024).
-#         """
-#         super(VAE, self).__init__()
-
-#         # Encoder network
-#         self.encoder = nn.Sequential(
-#             nn.Linear(input_dim, hidden_dim),
-#             # nn.ReLU(),
-#             nn.GELU(),
-#             nn.Linear(hidden_dim, hidden_dim),
-#             nn.GELU(),
-#             # nn.ReLU()
-#         )
-
-#         # Latent space: mean and log-variance
-#         self.fc_mu = nn.Linear(hidden_dim, latent_dim)
-#         self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
-
-#         # Decoder network
-#         self.decoder = nn.Sequential(
-#             nn.Linear(latent_dim, hidden_dim),
-#             nn.GELU(),
-#             nn.Linear(hidden_dim, input_dim)
-#         )
-
-#         # Initialize weights with Xavier initialization for stability
-#         self.encoder.apply(self.weights_init)
-#         self.fc_mu.apply(self.weights_init)
-#         self.fc_logvar.apply(self.weights_init)
-#         self.decoder.apply(self.weights_init)
-
-#     def weights_init(self, m):
-#         """Xavier initialization for Linear layers."""
-#         if isinstance(m, nn.Linear):
-#             nn.init.xavier_uniform_(m.weight)
-#             nn.init.constant_(m.bias, 0)
-
-#     def encode(self, x):
-#         """Encodes input to latent space parameters (mean and log-variance) with stabilization."""
-#         # Normalize input to avoid extreme values
-#         print(f"before normalization x - min: {x.min().item()}, max: {x.max().item()}, contains NaN: {torch.isnan(x).any().item()}")
-#         print(f"x shape: {x.shape}") 
-#         x = (x - x.mean(dim=1, keepdim=True)) / (x.std(dim=1, keepdim=True) + 1e-6)
-#         print(f"Normalized x - min: {x.min().item()}, max: {x.max().item()}, contains NaN: {torch.isnan(x).any().item()}")
-
-#         h = x
-#         for i, layer in enumerate(self.encoder):
-#             h = layer(h)
-#             print(f"Layer {i} - min: {h.min().item()}, max: {h.max().item()}, contains NaN: {torch.isnan(h).any().item()}")
-
-#         # Compute mean and log-variance, then clamp to stabilize
-#         mu = torch.clamp(self.fc_mu(h), min=-5, max=5)
-#         logvar = torch.clamp(self.fc_logvar(h), min=-5, max=5)
-#         print(f"mu - min: {mu.min().item()}, max: {mu.max().item()}, contains NaN: {torch.isnan(mu).any().item()}")
-#         print(f"logvar - min: {logvar.min().item()}, max: {logvar.max().item()}, contains NaN: {torch.isnan(logvar).any().item()}")
-
-#         return mu, logvar
-
-#     def reparameterize(self, mu, logvar):
-#         """Reparameterization trick to sample from N(mu, var) with stabilization."""
-#         std = torch.exp(0.5 * logvar)
-#         eps = torch.randn_like(std)
-#         return mu + eps * std
-
-#     def decode(self, z):
-#         """Decodes from latent space back to the original feature space."""
-#         return self.decoder(z)
-
-#     def forward(self, x):
-#         """Full forward pass: encode, reparameterize, and decode."""
-#         mu, logvar = self.encode(x)
-#         z = self.reparameterize(mu, logvar)
-#         recon_x = self.decode(z)
-#         return recon_x, mu, logvar
-
-
-
-class VAE_InternVLChatModel(PreTrainedModel):
+class Prim_InternVLChatModel(PreTrainedModel):
     config_class = InternVLChatConfig
     main_input_name = 'pixel_values'
     _no_split_modules = ['InternVisionModel', 'LlamaDecoderLayer', 'InternLM2DecoderLayer',
@@ -318,7 +49,8 @@ class VAE_InternVLChatModel(PreTrainedModel):
 
     def __init__(self, config: InternVLChatConfig, vision_model=None, language_model=None):
         super().__init__(config)
-
+        
+        self.prim_dim = 20  #Edit
         assert version_cmp(transformers.__version__, '4.37.0', 'ge')
         image_size = config.force_image_size or config.vision_config.image_size
         patch_size = config.vision_config.patch_size
@@ -353,17 +85,24 @@ class VAE_InternVLChatModel(PreTrainedModel):
         vit_hidden_size = config.vision_config.hidden_size
         llm_hidden_size = config.llm_config.hidden_size
 
-        # self.mlp1 = nn.Sequential(
-        #     nn.LayerNorm(vit_hidden_size * int(1 / self.downsample_ratio) ** 2),
-        #     nn.Linear(vit_hidden_size * int(1 / self.downsample_ratio) ** 2, llm_hidden_size),
-        #     nn.GELU(),
-        #     nn.Linear(llm_hidden_size, llm_hidden_size)
-        # )
-
-        # Instantiate VAE for visual feature encoding
-        # self.vae = VAE(input_dim=4096, hidden_dim=1024, latent_dim=64, output_dim=4096)  # VAE input matches vit_embeds size (4096)
-        # self.vae = VAE(latent_dim=64, hidden_channels=256)
-        self.vae = VAE(input_dim=4096, hidden_dim=3584, latent_dim=3072, output_dim=4096)
+        self.mlp1 = nn.Sequential(
+            nn.LayerNorm(vit_hidden_size * int(1 / self.downsample_ratio) ** 2),
+            nn.Linear(vit_hidden_size * int(1 / self.downsample_ratio) ** 2, llm_hidden_size),
+            nn.GELU(),
+            nn.Linear(llm_hidden_size, llm_hidden_size)
+        )
+        self.mlp2 = nn.Sequential(
+            nn.LayerNorm(256),
+            nn.Linear(256, 256),
+            nn.GELU(),
+            nn.Linear(256, self.prim_dim)
+        )
+        self.mlp3 = nn.Sequential(
+            nn.LayerNorm(llm_hidden_size),
+            nn.Linear(llm_hidden_size, 256),
+            nn.GELU(),
+            nn.Linear(256, 1)
+        )
 
         self.img_context_token_id = None
         self.conv_template = get_conv_template(self.template)
@@ -379,7 +118,17 @@ class VAE_InternVLChatModel(PreTrainedModel):
         if config.use_llm_lora:
             self.wrap_llm_lora(r=config.use_llm_lora, lora_alpha=2 * config.use_llm_lora)
 
+    # NEW
+    def _init_weights(self, module):
+        super()._init_weights(module)
 
+        if isinstance(module, (nn.Linear,)):
+            nn.init.xavier_normal_(module.weight)
+            nn.init.zeros_(module.bias)
+            print('init new layer:', module._get_name(), module.weight.shape)
+            
+    # END NEW
+    
 
     def wrap_backbone_lora(self, r=128, lora_alpha=256, lora_dropout=0.05):
         lora_config = LoraConfig(
@@ -418,6 +167,8 @@ class VAE_InternVLChatModel(PreTrainedModel):
             pixel_values: torch.FloatTensor,
             input_ids: torch.LongTensor = None,
             attention_mask: Optional[torch.Tensor] = None,
+            prim_target: Optional[torch.FloatTensor] = None,    # <- NEW
+            patch_counts: Optional[torch.LongTensor] = None,    # <- NEW
             position_ids: Optional[torch.LongTensor] = None,
             image_flags: Optional[torch.LongTensor] = None,
             past_key_values: Optional[List[torch.FloatTensor]] = None,
@@ -432,9 +183,11 @@ class VAE_InternVLChatModel(PreTrainedModel):
         image_flags = image_flags.squeeze(-1)
         input_embeds = self.language_model.get_input_embeddings()(input_ids).clone()
 
-        vit_embeds = self.extract_feature(pixel_values)
+        vit_embeds, prim_embeds, prim_factor = self.extract_feature(pixel_values)
         vit_embeds = vit_embeds[image_flags == 1]
         vit_batch_size = pixel_values.shape[0]
+
+        vit_embeds = torch.cat((prim_embeds, vit_embeds), dim=1)
 
         B, N, C = input_embeds.shape
         input_embeds = input_embeds.reshape(B * N, C)
@@ -444,6 +197,7 @@ class VAE_InternVLChatModel(PreTrainedModel):
 
         input_ids = input_ids.reshape(B * N)
         selected = (input_ids == self.img_context_token_id)
+
         try:
             input_embeds[selected] = input_embeds[selected] * 0.0 + vit_embeds.reshape(-1, C)
             ignore_flag = False
@@ -470,6 +224,7 @@ class VAE_InternVLChatModel(PreTrainedModel):
         logits = outputs.logits
 
         loss = None
+
         if labels is not None:
             # Shift so that tokens < n predict n
             shift_logits = logits[..., :-1, :].contiguous()
@@ -484,9 +239,45 @@ class VAE_InternVLChatModel(PreTrainedModel):
             if ignore_flag:
                 loss = loss * 0.0
 
+
+        momentum_flag = False  #Edit
+        # ———— NEW: use patch_counts to let prim_factor →[B,20,1] ————
+        if prim_target is not None and patch_counts is not None:
+            # patch_counts: tensor([p1,p2,…]) length B
+            splits = torch.split(prim_factor, patch_counts.tolist(), dim=0)
+            #  patch-level factor per sample, average
+            sample_factors = [s.mean(dim=0) for s in splits]     # Every s.shape=[pi,20,1] -> mean->[20,1]
+            prim_factor = torch.stack(sample_factors, dim=0)     # -> [B,20,1]
+            #  MSE
+            prim_loss = F.mse_loss(prim_factor, prim_target)
+            if not momentum_flag:
+                loss = loss + prim_loss
+            else:
+                # Exponential Moving Average, EMA
+                if not hasattr(self, 'initial_prim_loss'):
+                    self.initial_prim_loss = prim_loss.item() 
+                    self.running_prim_loss = self.initial_prim_loss
+                else:
+                    momentum = 0.99
+                    self.running_prim_loss = (momentum * self.running_prim_loss + (1.0 - momentum) * prim_loss.item())
+
+                lambda_prim = self.running_prim_loss / (self.initial_prim_loss + 1e-8)
+                lambda_prim = min(max(lambda_prim, 0.0), 1.0)
+                loss = loss + lambda_prim * prim_loss
+        # ——————————————————————————————————————————————
+
+        # loss_xxx = f(xxx, prim_factor)
+        # loss += 1.0 * 0
         if not return_dict:
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
+
+        if torch.distributed.get_rank() == 0:
+            if momentum_flag:
+                print(f"CE loss: {loss.item():.6f}, prim loss: {prim_loss.item():.6f}, lambda_prim: {lambda_prim}, ignore_flag: {ignore_flag}")
+            else:
+                print(f"CE loss: {loss.item():.6f}, prim loss: {prim_loss.item():.6f}, ignore_flag: {ignore_flag}")
+                
 
         return CausalLMOutputWithPast(
             loss=loss,
@@ -529,11 +320,13 @@ class VAE_InternVLChatModel(PreTrainedModel):
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
         vit_embeds = self.pixel_shuffle(vit_embeds, scale_factor=self.downsample_ratio)
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], -1, vit_embeds.shape[-1])
-        # vit_embeds = self.mlp1(vit_embeds)
-        x_hat, mean, log_var, z = self.vae(vit_embeds)
-        # loss =
-        vit_embeds = x_hat
-        return vit_embeds #, loss
+        vit_embeds = self.mlp1(vit_embeds)   #torch.Size([16, 256, 4096])
+
+        prim_embeds = self.mlp2(vit_embeds.transpose(1, 2)).transpose(1, 2)  #torch.Size([16, 20, 4096])
+        prim_factor = self.mlp3(prim_embeds) #torch.Size([16, 20, 1])
+        # 16,256,4096 -> 16,4096,256 -> 16,4096,20 -> 16, 20, 4096
+
+        return vit_embeds, prim_embeds, prim_factor
 
     def batch_chat(self, tokenizer, pixel_values, questions, generation_config, num_patches_list=None,
                    history=None, return_history=False, IMG_START_TOKEN='<img>', IMG_END_TOKEN='</img>',
@@ -582,6 +375,8 @@ class VAE_InternVLChatModel(PreTrainedModel):
         )
         responses = tokenizer.batch_decode(generation_output, skip_special_tokens=True)
         responses = [response.split(template.sep)[0].strip() for response in responses]
+        # print("====================================================")
+        # print(response)
         return responses
 
     def chat(self, tokenizer, pixel_values, question, generation_config, history=None, return_history=False,
@@ -615,7 +410,7 @@ class VAE_InternVLChatModel(PreTrainedModel):
             print(f'dynamic ViT batch size: {image_bs}')
 
         for num_patches in num_patches_list:
-            image_tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * self.num_image_token * num_patches + IMG_END_TOKEN
+            image_tokens = IMG_START_TOKEN + IMG_CONTEXT_TOKEN * (self.num_image_token +self.prim_dim) * num_patches + IMG_END_TOKEN
             query = query.replace('<image>', image_tokens, 1)
 
         model_inputs = tokenizer(query, return_tensors='pt')
@@ -631,6 +426,9 @@ class VAE_InternVLChatModel(PreTrainedModel):
         response = tokenizer.batch_decode(generation_output, skip_special_tokens=True)[0]
         response = response.split(template.sep)[0].strip()
         history.append((question, response))
+
+        # print("====================================================")
+        # print(response)
 
         if return_history:
             return response, history
@@ -659,10 +457,12 @@ class VAE_InternVLChatModel(PreTrainedModel):
             if visual_features is not None:
                 vit_embeds = visual_features
             else:
-                vit_embeds = self.extract_feature(pixel_values)
+                vit_embeds, prim_embeds, prim_factor = self.extract_feature(pixel_values)
             input_embeds = self.language_model.get_input_embeddings()(input_ids)
             B, N, C = input_embeds.shape
             input_embeds = input_embeds.reshape(B * N, C)
+            # NEW
+            vit_embeds = torch.cat((prim_embeds, vit_embeds), dim=1)
 
             input_ids = input_ids.reshape(B * N)
             selected = (input_ids == self.img_context_token_id)
@@ -674,16 +474,16 @@ class VAE_InternVLChatModel(PreTrainedModel):
             input_embeds = self.language_model.get_input_embeddings()(input_ids)
 
         gen_config = GenerationConfig(
-            max_length=200,           # 最大生成长度
-            min_length=10,            # 最小生成长度
-            do_sample=True,           # 是否采用采样策略
-            temperature=0.7,          # 采样温度
-            top_k=50,                 # Top-k 采样
-            top_p=0.95,               # Top-p（nucleus）采样
-            no_repeat_ngram_size=3,   # 禁止重复 n-gram（例如连续3个词）
-            num_beams=5,              # beam search 的 beam 数量
-            early_stopping=True,      # beam search 提前停止条件
-            repetition_penalty=1.2,   # 重复惩罚
+            max_length=200,         
+            min_length=10,           
+            do_sample=True,          
+            temperature=0.7,       
+            top_k=50,             
+            top_p=0.95,             
+            no_repeat_ngram_size=3,   
+            num_beams=5,             
+            early_stopping=True,     
+            repetition_penalty=1.2,  
     )
 
         outputs = self.language_model.generate(

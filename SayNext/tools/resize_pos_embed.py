@@ -1,7 +1,7 @@
 import argparse
 
 import torch
-from saynext.model.saynext_models import InternVLChatModel
+from saynext.model.saynext_models import Prim_InternVLChatModel
 from transformers import AutoTokenizer
 
 argparse = argparse.ArgumentParser()

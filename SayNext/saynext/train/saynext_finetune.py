@@ -2,8 +2,8 @@
  * Copyright (c) 2025.
  * All rights reserved.
  * Code for SayNext project
+ * Part code from InterVL
 """
-
 
 import gc
 import json
@@ -27,7 +27,7 @@ from saynext.model.internlm2.modeling_internlm2 import InternLM2ForCausalLM
 from saynext.model.saynext_models import (InternVisionConfig,
                                           InternVisionModel,
                                           InternVLChatConfig,
-                                          VAE_InternVLChatModel)
+                                          Prim_InternVLChatModel)
 from saynext.patch import (concat_pad_data_collator,
                             replace_llama_rmsnorm_with_fused_rmsnorm,
                             replace_train_sampler)
@@ -51,7 +51,6 @@ from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils.logging import (enable_default_handler,
                                         enable_explicit_format, set_verbosity)
 
-# from ultralytics import YOLO
 
 import torch.utils.checkpoint as checkpoint
 
@@ -100,10 +99,6 @@ class ModelArguments:
         metadata={'help': 'Path to pretrained model or model identifier from huggingface.co/models'}
     )
     mlp_path: Optional[str] = field(
-        default=None,
-        metadata={'help': 'Path to pretrained model or model identifier from huggingface.co/models'}
-    )
-    vae_path: Optional[str] = field(
         default=None,
         metadata={'help': 'Path to pretrained model or model identifier from huggingface.co/models'}
     )
@@ -249,6 +244,8 @@ class LazySupervisedDataset(Dataset):
         random_seed=0,
     ):
         super(LazySupervisedDataset, self).__init__()
+
+        self.prim_dim = 20     #Edit
         self.ds_name = ds_name
         self.tokenizer = tokenizer
         self.template_name = template_name
@@ -310,7 +307,7 @@ class LazySupervisedDataset(Dataset):
                         token_length = tokenizer(
                             conversations, return_tensors='pt', padding=False, truncation=False,
                         ).input_ids.size(1)
-                        self.conv2length[str_length] = token_length + num_image_token * (
+                        self.conv2length[str_length] = token_length + (num_image_token + self.prim_dim) * (
                                     max_dynamic_patch + use_thumbnail)
                     else:
                         token_length = self.conv2length[str_length]
@@ -385,7 +382,7 @@ class LazySupervisedDataset(Dataset):
 
         # Preprocess the conversations and generate the return dictionary
         ret = preprocess_function(self.template_name, [deepcopy(data_item['conversations'])],
-                                  self.tokenizer, [self.num_image_token * num_patches],
+                                  self.tokenizer, [(self.num_image_token + self.prim_dim) * num_patches],
                                   group_by_length=self.group_by_length, ds_name=self.ds_name)
 
         # Create the final return dictionary
@@ -426,7 +423,7 @@ class LazySupervisedDataset(Dataset):
         preprocess_function = self.get_preprocess_function()
 
         # Preprocess the conversations and generate the return dictionary
-        num_image_tokens = [self.num_image_token * num_tile for num_tile in num_tiles]
+        num_image_tokens = [(self.num_image_token + self.prim_dim) * num_tile for num_tile in num_tiles]
         ret = preprocess_function(self.template_name, [deepcopy(data_item['conversations'])],
                                   self.tokenizer, num_image_tokens, group_by_length=self.group_by_length,
                                   ds_name=self.ds_name, num_image=num_image)
@@ -440,31 +437,6 @@ class LazySupervisedDataset(Dataset):
             image_flags=torch.tensor([1] * num_patches, dtype=torch.long)
         )
         return ret
-
-    def _process_video(self, video_path, max_frames=4, sampling_interval=8):
-        print("Processing video: " + video_path)
-        vr = VideoReader(video_path, ctx=cpu(0), num_threads=1)
-        total_frames = len(vr)  
-
-        if total_frames >= max_frames * sampling_interval:
-            max_start = total_frames - (max_frames - 1) * sampling_interval
-            start = random.randint(0, max_start - 1)
-            frame_indices = [start + i * sampling_interval for i in range(max_frames)]
-        else:
-            frame_indices = np.linspace(0, total_frames - 1, max_frames, dtype=int).tolist()
-
-        transform = build_transform(input_size=448)
-        pixel_values_list, num_patches_list = [], []
-        
-        for idx in frame_indices:
-            img = Image.fromarray(vr[idx].asnumpy()).convert('RGB')
-            img_tiles = dynamic_preprocess(img, image_size=448, use_thumbnail=True, max_num=1)
-            pixel_values = torch.stack([transform(tile) for tile in img_tiles])
-            pixel_values_list.append(pixel_values)
-            num_patches_list.append(pixel_values.shape[0])
-        
-        pixel_values = torch.cat(pixel_values_list)
-        return pixel_values, frame_indices
         
     def _process_video(self, video_path, max_frames, sampling_interval):
         print("Processing video: " + video_path)
@@ -484,21 +456,19 @@ class LazySupervisedDataset(Dataset):
             start_index = max(0, total_frames - max_frames)
             frame_indices = list(range(start_index, total_frames))
         else:
-            # select start_index
             start_index = random.randint(0, max_start_index)
             frame_indices = [start_index + i * sampling_interval for i in range(max_frames)]
 
         print(f"Selected frame indices: {frame_indices}")
 
-        # frame extraction
         for frame_index in frame_indices:
             if frame_index >= total_frames:
                 break  
 
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)  
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index) 
             ret, frame = cap.read()
             if not ret:
-                break 
+                break  
 
             # Convert BGR (OpenCV format) to RGB
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -508,27 +478,7 @@ class LazySupervisedDataset(Dataset):
 
         cap.release()
 
-        return image_list, frame_indices
-
-    def get_exp(self, index, video_file, sampling = True):
-        exp_caption_json_path = "./exp_cap.json"
-        with open(exp_caption_json_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        
-        if video_file not in data:
-            print(f"{video_file} not in this json file.")
-            return ""
-        
-        groups = data[video_file]
-        for group in groups:
-            if group["start_index"] <= index <= group["end_index"]:
-                if sampling:
-                    return random.choice(group["multi_caption"])
-                else:
-                    return group["one_caption"]
-
-        return ""
-
+        return image_list
 
     def video_get_item(self, data_item):
         # Build transformation function
@@ -542,41 +492,14 @@ class LazySupervisedDataset(Dataset):
         video_file = data_item['video']
         video_path = os.path.join(self.root, video_file)
 
-        # Load the video frames using tcs_loader
-        # TODO: Load videos without using tcsloader.
-#        image_list = self.tcs_loader(
-#            video_path,
-#            image_type='video',
-#            max_num_frames=self.max_num_frame,
-#            min_num_frames=self.min_num_frame,
-#            sample=self.sampling_method,
-#            clip=data_item.get('clip', None))
-
-#       Rewrite the frame extraction function !!!!
-        image_list, frame_indices = self._process_video(video_path, self.max_num_frame, self.sampling_interval)
+        image_list = self._process_video(video_path, self.max_num_frame, self.sampling_interval)
         print(f"Extracted {len(image_list)} frames.")
 
-        # print("====================================================")
 
         # Generate special tokens for each video frame
-        # special_tokens = '\n'.join(['Frame{}: <image>'.format(i + 1) for i in range(len(image_list))])
-        # data_item['conversations'][0]['value'] = data_item['conversations'][0]['value'].replace('<video>\n', special_tokens)
-
-        sampling = True
-        special_tokens = ""
-        for i in frame_indices:
-            # add_token = self.process_image(image)
-
-            # add_token = self.get_exp(i, video_file, sampling)
-            # add_token = f"in this frame {add_token}"
-            # special_tokens += f"Frame{i+1}: <image>, {add_token}\n"
-            # for ablation study
-            special_tokens += f"Frame{i+1}: <image>"
-
-        data_item['conversations'][0]['value'] = data_item['conversations'][0]['value'].replace('<video>\n', special_tokens)
-
-        # print(data_item['conversations'][0]['value'])
-
+        special_tokens = '\n'.join(['Frame{}: <image>'.format(i + 1) for i in range(len(image_list))])
+        data_item['conversations'][0]['value'] = data_item['conversations'][0]['value'].replace(
+            '<video>\n', special_tokens)
 
         # Transform each frame image and stack them into a tensor
         pixel_values = [transform(image) for image in image_list]
@@ -587,12 +510,15 @@ class LazySupervisedDataset(Dataset):
         preprocess_function = self.get_preprocess_function()
 
         # Preprocess the conversations and generate the return dictionary
-        num_image_tokens = [self.num_image_token] * num_patches
+        num_image_tokens = [self.num_image_token + self.prim_dim] * num_patches
         ret = preprocess_function(self.template_name, [deepcopy(data_item['conversations'])],
                                   self.tokenizer, num_image_tokens, group_by_length=self.group_by_length,
                                   ds_name=self.ds_name, num_image=num_patches)
 
+        # NEW
+        ret['prim_target'] = data_item.get('vector', [0.]*self.prim_dim)
 
+        # print(f'Got prim vector: {ret["prim_target"]}')
 
         # Create the final return dictionary
         ret = dict(
@@ -600,46 +526,11 @@ class LazySupervisedDataset(Dataset):
             labels=ret['labels'][0],
             attention_mask=ret['attention_mask'][0],
             pixel_values=pixel_values,
+            prim_target=ret['prim_target'],
             image_flags=torch.tensor([1] * num_patches, dtype=torch.long)
         )
         return ret
 
-    def pure_text_get_item(self, data_item):
-        # Build transformation function
-        transform = self.get_transform()
-
-        # Create a blank white image
-        image = Image.new('RGB', (224, 224), (255, 255, 255))
-
-        # Dynamically preprocess the image to generate patches
-        images = dynamic_preprocess(image, min_num=self.min_dynamic_patch, max_num=1,
-                                    image_size=self.image_size, use_thumbnail=self.use_thumbnail)
-
-        # Apply the transformation to each image patch and stack them into a tensor
-        pixel_values = [transform(image) for image in images]
-        pixel_values = torch.stack(pixel_values)
-        num_patches = pixel_values.size(0)
-
-        # Ensure there is only one patch
-        assert num_patches == 1, f'The number of patches should be 1, but got {num_patches}.'
-
-        # Select the appropriate preprocessing function based on the template name
-        preprocess_function = self.get_preprocess_function()
-
-        # Preprocess the conversations and generate the return dictionary
-        ret = preprocess_function(self.template_name, [deepcopy(data_item['conversations'])],
-                                  self.tokenizer, [self.num_image_token * num_patches], text_only=True,
-                                  group_by_length=self.group_by_length, ds_name=self.ds_name)
-
-        # Create the final return dictionary
-        ret = dict(
-            input_ids=ret['input_ids'][0],
-            labels=ret['labels'][0],
-            attention_mask=ret['attention_mask'][0],
-            pixel_values=pixel_values,
-            image_flags=torch.tensor([0] * num_patches, dtype=torch.long)
-        )
-        return ret
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
         i = i % len(self.raw_data)
@@ -718,9 +609,6 @@ def build_datasets(
             normalize_type=normalize_type,
             random_seed=ds_idx,
         )
-#        print("___________________________________________________")
-#        print(f"DEBUG: Dataset created: length = {len(dataset)}")   2172
-#        print(f"DEBUG: First sample = {dataset[0]}")  [<'input_ids'>,<'labels'>,<'attention_mask'>,<'pixel_values'>,<'image_flags'>]
         logger.info(f'Add dataset: {ds_name} with length: {len(dataset)}')
         datasets.append(dataset)
         if data_args.use_data_resampling:
@@ -850,8 +738,9 @@ def main():
     tcs_loader = TCSLoader('~/petreloss.conf') if has_tcs_loader else None
 
 
+
     if model_args.model_name_or_path is not None:
-        logger.info('Loading VAE_InternVLChatModel...')
+        logger.info('Loading Prim_InternVLChatModel...')
         config = InternVLChatConfig.from_pretrained(model_args.model_name_or_path)
         config.vision_config.drop_path_rate = model_args.drop_path_rate
         if config.llm_config.model_type == 'internlm2':
@@ -867,7 +756,7 @@ def main():
         config.ps_version = model_args.ps_version
         config.min_dynamic_patch = data_args.min_dynamic_patch
         config.max_dynamic_patch = data_args.max_dynamic_patch
-        model = VAE_InternVLChatModel.from_pretrained(
+        model = Prim_InternVLChatModel.from_pretrained(
             model_args.model_name_or_path, torch_dtype=torch.bfloat16, config=config)
     else:
         logger.info('Loading ViT-6B...')
@@ -896,27 +785,19 @@ def main():
             use_thumbnail=data_args.use_thumbnail, ps_version=model_args.ps_version,
             min_dynamic_patch=data_args.min_dynamic_patch, max_dynamic_patch=data_args.max_dynamic_patch)
         internvl_chat_config.force_image_size = data_args.force_image_size
-        logger.info('Building VAE_InternVLChatModel...')
-        model = VAE_InternVLChatModel(internvl_chat_config, vision_model, llm)
+        logger.info('Building Prim_InternVLChatModel...')
+        model = Prim_InternVLChatModel(internvl_chat_config, vision_model, llm)
     model.img_context_token_id = img_context_token_id
+
 
     assert model.config.downsample_ratio == data_args.down_sample_ratio
 
-    # if model_args.mlp_path is not None:
-    #     logger.info('Loading pretrained MLP projector...')
-    #     state_dict = torch.load(model_args.mlp_path, map_location='cpu')
-    #     message = model.mlp1.load_state_dict(state_dict)
-    #     logger.info(message)
-    # logger.info('Finished')
-    
-    # New
-    if model_args.vae_path is not None:
-        logger.info('Loading pretrained VAE...')
-        state_dict = torch.load(model_args.vae_path, map_location='cpu')
-        message = model.vae.load_state_dict(state_dict)
+    if model_args.mlp_path is not None:
+        logger.info('Loading pretrained MLP projector...')
+        state_dict = torch.load(model_args.mlp_path, map_location='cpu')
+        message = model.mlp1.load_state_dict(state_dict)
         logger.info(message)
-    logger.info('Finished') 
-    # New end
+    logger.info('Finished')
 
     patch_size = model.config.vision_config.patch_size
     logger.info(f'model.config.force_image_size: {model.config.force_image_size}')
@@ -954,12 +835,6 @@ def main():
         min_dynamic_patch=data_args.min_dynamic_patch, max_dynamic_patch=data_args.max_dynamic_patch,
         normalize_type=data_args.normalize_type)
 
-    # test_dataset = build_eval_datasets(
-    #     data_args, tokenizer, tcs_loader, model, group_by_length=training_args.group_by_length,
-    #     dynamic_image_size=data_args.dynamic_image_size, use_thumbnail=data_args.use_thumbnail,
-    #     min_dynamic_patch=data_args.min_dynamic_patch, max_dynamic_patch=data_args.max_dynamic_patch,
-    #     normalize_type=data_args.normalize_type)
-    test_dataset = None
 
     def _freeze_params(module):
         for param in module.parameters():
@@ -985,8 +860,7 @@ def main():
         model.config.use_llm_lora = model_args.use_llm_lora
 
     if model_args.freeze_mlp:
-        # _freeze_params(model.mlp1)
-        _freeze_params(model.vae)
+        _freeze_params(model.mlp1)
 
     if model_args.unfreeze_vit_layers != 0:
         layers = model.vision_model.encoder.layers[model_args.unfreeze_vit_layers:]
@@ -1006,15 +880,13 @@ def main():
     # Initialize our Trainer
     if model_args.use_custom_trainer:
         replace_create_optimizer()
-
     training_args.dataloader_pin_memory = False
-    # print(training_args)
-
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
-        eval_dataset=None,
+        # eval_dataset=test_dataset if training_args.do_eval else None,
+        eval_dataset=None, 
         tokenizer=tokenizer,
         data_collator=concat_pad_data_collator
     )
@@ -1039,17 +911,17 @@ def main():
         trainer.save_metrics('train', metrics)
         trainer.save_state()
 
-    # # Evaluation
-    # if training_args.do_eval:
-    #     logger.info("Running evaluation on the test dataset")
-    #     metrics = trainer.evaluate()
-    #     try:
-    #         metrics['eval_samples'] = len(test_dataset)
-    #     except:
-    #         metrics['eval_samples'] = -1
+    # Evaluation
+    if training_args.do_eval:
+        logger.info("Running evaluation on the test dataset")
+        metrics = trainer.evaluate()
+        try:
+            metrics['eval_samples'] = len(test_dataset)
+        except:
+            metrics['eval_samples'] = -1
 
-    #     trainer.log_metrics('eval', metrics)
-    #     trainer.save_metrics('eval', metrics)
+        trainer.log_metrics('eval', metrics)
+        trainer.save_metrics('eval', metrics)
 
 if __name__ == '__main__':
     main()
