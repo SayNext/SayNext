@@ -10,9 +10,9 @@
 
 ## 📰 News
 
-**[2025.9.20]** Welcome to **watch** our official [website](https://saynext.github.io/)! 
+**[2025.9.20]** Welcome to **visit** our official [website](https://saynext.github.io/) to find more information! 
 
-**[2025.3.19]** Welcome to **watch** this repository for the latest updates.
+**[2025.3.19]** Welcome to **visit** this repository for the latest updates.
 
 
 ## :croissant: Dataset
