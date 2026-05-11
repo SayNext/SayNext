@@ -5,18 +5,18 @@
 </p>
 
 
-> [**SAYNEXT: A Benchmark and Cognitively Inspired Framework for Next-Utterance Prediction with Multimodal LLMs**]<br>
+> [**SayNext-Bench: Why Do LLMs Struggle with Next-Utterance Anticipation?**]<br>
 
 
 ## 📰 News
 
-**[2025.9.20]** Welcome to **visit** our official [website](https://saynext.github.io/) to find more information! 
+**[2026.4.20]** Welcome to **visit** our official [website](https://saynext.github.io/) to find more information! 
 
 **[2025.3.19]** Welcome to **visit** this repository for the latest updates.
 
 
 ## :croissant: Dataset
-The dataset is in our [Huggingface](https://huggingface.co/datasets/SayNext/SayNext-PC2K). 
+The dataset is in our [Huggingface](https://huggingface.co/datasets/SayNext/SayNext). 
 
 
 ## :hugs: Models Download
