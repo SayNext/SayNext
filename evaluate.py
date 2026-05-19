@@ -30,7 +30,7 @@ follow the format  <dialogue_id>/<turn_id>-<...>  (e.g. d001/t03-frame42.mp4).
 Usage
 -----
   # All six metrics:
-  python evaluate.py --csv_dir ./results --lexicon_path ./lexicons/NRC-VADI-Lexicon.csv
+  python evaluate.py --csv_dir ./results --lexicon_path ./lexicons/NRC-VAD-Lexicon.csv
 
   # Skip CEC (no lexicon available):
   python evaluate.py --csv_dir ./results --skip_cec
@@ -46,10 +46,10 @@ Dependencies
     - microsoft/deberta-xlarge-mnli  (SS-B)
     - sentence-transformers/all-mpnet-base-v2  (SS-S)
 
-  NRC-VADI Lexicon (required for CEC-V / CEC-A):
-    Download NRC-VADI-Lexicon.csv from the EmotionDynamics repository:
+  NRC-VAD Lexicon (required for CEC-V / CEC-A):
+    Download NRC-VAD-Lexicon.csv from the EmotionDynamics repository: (You may need combine valence/arousal/dominance .csv files into 1 file)
       https://github.com/Priya22/EmotionDynamics.git
-    Place it at ./lexicons/NRC-VADI-Lexicon.csv  or pass --lexicon_path.
+    Place it at ./lexicons/NRC-VAD-Lexicon.csv  or pass --lexicon_path.
 """
 
 import os
@@ -394,11 +394,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--bertscore_rescale",  action="store_true", help="Enable BERTScore baseline rescaling.")
     p.add_argument(
         "--lexicon_path",
-        default="./lexicons/NRC-VADI-Lexicon.csv",
+        default="./lexicons/NRC--Lexicon.csv",
         help=(
-            "Path to NRC-VADI-Lexicon.csv for CEC metrics. "
-            "Download from: https://github.com/ShawonAshraf/EmotionDynamics "
-            "and place at ./lexicons/NRC-VADI-Lexicon.csv"
+            "Path to NRC-VAD-Lexicon.csv for CEC metrics. "
+            "Download from: https://github.com/Priya22/EmotionDynamics.git "
+            "and place at ./lexicons/NRC-VAD-Lexicon.csv"
         ),
     )
     p.add_argument(
@@ -421,12 +421,12 @@ def main():
     lexicon = None
     if not args.skip_cec:
         if os.path.isfile(args.lexicon_path):
-            print(f"Loading NRC-VADI lexicon from: {args.lexicon_path}")
+            print(f"Loading NRC-VAD lexicon from: {args.lexicon_path}")
             lexicon = _read_lexicon(args.lexicon_path, _CEC_DIMS)
         else:
             print(
                 f"[WARN] Lexicon not found at '{args.lexicon_path}'. CEC metrics will be skipped.\n"
-                f"       To enable CEC, download NRC-VADI-Lexicon.csv from\n"
+                f"       To enable CEC, download NRC-VAD-Lexicon.csv from\n"
                 f"       https://github.com/Priya22/EmotionDynamics.git\n"
                 f"       and place it at: {args.lexicon_path}",
                 file=sys.stderr,
